@@ -4,10 +4,10 @@ use std::mem;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable, Hsla,
-    InteractiveElement, IntoElement, ParentElement, Pixels, Render, RenderOnce, SharedString, Size,
-    StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla, img,
-    prelude::FluentBuilder as _, px, rgb, size,
+    AnyElement, App, AppContext as _, Context, DragMoveEvent, ElementId, Entity, FocusHandle,
+    Focusable, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, Render, RenderOnce,
+    SharedString, Size, StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div,
+    hsla, img, prelude::FluentBuilder as _, px, rgb, size,
 };
 use gpui_kit::base::{Button as BaseButton, ElementExt as _};
 use gpui_kit::component::{
@@ -25,7 +25,8 @@ use super::geometry::{
 };
 use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId};
 use super::inspector::{
-    ActionPickerContext, BindingInspectorData, ShortcutError, binding_inspector,
+    ActionPickerContext, BindingInspectorData, INSPECTOR_DEFAULT_W, INSPECTOR_MAX_W,
+    ResizeInspector, ShortcutError, binding_inspector,
 };
 use super::leader_lines::{Geometry as LeaderGeometry, Label, paint as paint_leader_lines};
 use crate::app::{glow_canvas, keyboard_glow};
@@ -86,8 +87,7 @@ const MODEL_MIN_H: f32 = 360.;
 const MODEL_CONTENT_MAX_W: f32 = 760.;
 /// Horizontal chrome the model can't draw into (the buttons-tab padding): the
 /// estimate of the canvas area until it is first measured.
-const MODEL_HORIZONTAL_RESERVE: f32 =
-    crate::ui::theme::DETAIL_RAIL_W + super::inspector::INSPECTOR_W + 48.;
+const MODEL_CHROME_W: f32 = crate::ui::theme::DETAIL_RAIL_W + 48.;
 /// Floor for the model's available width on a narrow window.
 const MODEL_MIN_CONTENT_W: f32 = 200.;
 
@@ -198,6 +198,10 @@ pub struct MouseModelView {
     /// The canvas area as last laid out, which the model and its cards fit
     /// inside. `None` until the first frame measures it.
     canvas_room: Option<Size<Pixels>>,
+    /// The inspector's width as the user last dragged it; kept for the
+    /// session only. Read it through [`Self::inspector_width`], which keeps it
+    /// clear of the canvas floor on a narrow window.
+    inspector_w: f32,
     _state_obs: Subscription,
 }
 
@@ -268,6 +272,7 @@ impl MouseModelView {
             custom_command_input,
             shortcut_record_focus: cx.focus_handle(),
             canvas_room: None,
+            inspector_w: INSPECTOR_DEFAULT_W,
             _state_obs: state_obs,
         }
     }
@@ -361,6 +366,35 @@ impl MouseModelView {
         self.mode = EditorMode::Idle;
     }
 
+    /// The inspector's width in this window: the dragged width, no narrower
+    /// than the default and no wider than leaves the model its minimum room.
+    fn inspector_width(&self, window: &Window) -> Pixels {
+        let room_for_inspector =
+            f32::from(window.viewport_size().width) - MODEL_CHROME_W - MODEL_MIN_CONTENT_W;
+        let max = INSPECTOR_MAX_W
+            .min(room_for_inspector)
+            .max(INSPECTOR_DEFAULT_W);
+        px(self.inspector_w.clamp(INSPECTOR_DEFAULT_W, max))
+    }
+
+    /// Follow a drag of the inspector's edge: `width` is where the pointer
+    /// puts it, and the model re-fits to the room that leaves.
+    fn set_inspector_width(&mut self, width: Pixels, window: &Window, cx: &mut Context<Self>) {
+        let before = self.inspector_width(window);
+        self.inspector_w = f32::from(width);
+        if self.inspector_width(window) != before {
+            cx.notify();
+        }
+    }
+
+    /// Put the inspector back to its default width.
+    pub(super) fn reset_inspector_width(&mut self, cx: &mut Context<Self>) {
+        if self.inspector_w != INSPECTOR_DEFAULT_W {
+            self.inspector_w = INSPECTOR_DEFAULT_W;
+            cx.notify();
+        }
+    }
+
     /// Keep the canvas area measured in the last frame, and lay the model out
     /// again when it changed.
     fn set_canvas_room(&mut self, room: Size<Pixels>, cx: &mut Context<Self>) {
@@ -384,7 +418,7 @@ impl MouseModelView {
         let viewport = window.viewport_size();
         let room = self.canvas_room.unwrap_or_else(|| {
             size(
-                viewport.width - px(MODEL_HORIZONTAL_RESERVE),
+                viewport.width - px(MODEL_CHROME_W) - self.inspector_width(window),
                 viewport.height - px(MODEL_VERTICAL_RESERVE),
             )
         });
@@ -599,6 +633,7 @@ impl Render for MouseModelView {
                 hidden_actions,
             },
             self.action_picker_context(&view),
+            self.inspector_width(window),
             cx,
         );
         workspace_layout(canvas, profile_status, inspector, &self.focus_handle, view)
@@ -646,6 +681,15 @@ fn workspace_layout(
         .items_stretch()
         .tab_group()
         .track_focus(focus_handle)
+        .on_drag_move::<ResizeInspector>({
+            let view = view.clone();
+            move |event: &DragMoveEvent<ResizeInspector>, window, cx| {
+                // The inspector hugs the right edge, so the pointer's distance
+                // from it is the width the user is asking for.
+                let width = event.bounds.right() - event.event.position.x;
+                view.update(cx, |view, cx| view.set_inspector_width(width, window, cx));
+            }
+        })
         .child(
             v_flex()
                 .flex_1()

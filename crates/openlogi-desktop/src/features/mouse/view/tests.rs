@@ -584,6 +584,7 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
                 invalid: InvalidDrafts::default(),
                 view: &entity,
             },
+            px(INSPECTOR_DEFAULT_W),
             cx,
         );
     });
@@ -1215,6 +1216,130 @@ fn the_model_and_full_values_fit_the_canvas_area_below_the_chrome(cx: &mut TestA
             "{value}: shown in {shown:?}, needs {full:?} on one line"
         );
     }
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+/// Draw twice: the first frame measures the canvas area, the second lays the
+/// model out in it.
+fn settle(cx: &mut VisualTestContext) {
+    for _ in 0..2 {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+}
+
+fn drag_inspector_edge_to(cx: &mut VisualTestContext, x: Pixels) {
+    let edge = cx.debug_bounds("inspector-edge").expect("the edge renders");
+    let from = edge.center();
+    // Hover the band first, so the press lands on it.
+    cx.simulate_mouse_move(from, None, Modifiers::default());
+    settle(cx);
+    cx.simulate_mouse_down(from, gpui::MouseButton::Left, Modifiers::default());
+    settle(cx);
+    // The move that starts the drag is not itself heard as a drag move, so
+    // the pointer takes two steps, as it does in practice.
+    for step_x in [from.x + (x - from.x) / 2., x] {
+        cx.simulate_mouse_move(
+            gpui::point(step_x, from.y),
+            Some(gpui::MouseButton::Left),
+            Modifiers::default(),
+        );
+        settle(cx);
+    }
+    cx.simulate_mouse_up(
+        gpui::point(x, from.y),
+        gpui::MouseButton::Left,
+        Modifiers::default(),
+    );
+    settle(cx);
+}
+
+#[gpui::test]
+fn dragging_the_inspector_edge_resizes_it_within_its_limits(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    cx.update(gpui_kit::init);
+    install_app_state(cx);
+    let (view, cx) = cx.add_window_view(|window, cx| UnderChrome {
+        model: cx.new(|cx| MouseModelView::new(window, cx)),
+    });
+    cx.simulate_resize(size(px(1256.), px(664.)));
+    settle(cx);
+
+    let inspector = |cx: &mut VisualTestContext| {
+        cx.debug_bounds("binding-inspector")
+            .expect("the inspector renders")
+    };
+    let room = |cx: &mut VisualTestContext| {
+        cx.debug_bounds("mouse-canvas-room")
+            .expect("the canvas area renders")
+    };
+    assert_eq!(inspector(cx).size.width, px(INSPECTOR_DEFAULT_W));
+    let room_before = room(cx).size.width;
+
+    // Dragging the edge 100px left makes the panel 100px wider and takes the
+    // room from the canvas area.
+    let left = inspector(cx).left();
+    drag_inspector_edge_to(cx, left - px(100.));
+    assert!(
+        (inspector(cx).size.width - px(INSPECTOR_DEFAULT_W + 100.)).abs() < px(1.),
+        "widened to {:?}",
+        inspector(cx).size.width
+    );
+    assert!(room(cx).size.width < room_before - px(90.));
+
+    // Far past the limit, the panel stops at the maximum.
+    let left = inspector(cx).left();
+    drag_inspector_edge_to(cx, left - px(1000.));
+    assert!(inspector(cx).size.width <= px(INSPECTOR_MAX_W) + px(1.));
+
+    // Dragging the edge back right never goes below the default.
+    let left = inspector(cx).left();
+    drag_inspector_edge_to(cx, left + px(1000.));
+    assert_eq!(inspector(cx).size.width, px(INSPECTOR_DEFAULT_W));
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn double_clicking_the_inspector_edge_restores_its_default_width(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    cx.update(gpui_kit::init);
+    install_app_state(cx);
+    let (view, cx) = cx.add_window_view(|window, cx| UnderChrome {
+        model: cx.new(|cx| MouseModelView::new(window, cx)),
+    });
+    cx.simulate_resize(size(px(1256.), px(664.)));
+    settle(cx);
+
+    let left = cx.debug_bounds("binding-inspector").unwrap().left();
+    drag_inspector_edge_to(cx, left - px(80.));
+    assert!(cx.debug_bounds("binding-inspector").unwrap().size.width > px(INSPECTOR_DEFAULT_W));
+
+    let edge = cx.debug_bounds("inspector-edge").unwrap().center();
+    cx.simulate_event(gpui::MouseDownEvent {
+        position: edge,
+        modifiers: Modifiers::default(),
+        button: gpui::MouseButton::Left,
+        click_count: 2,
+        first_mouse: false,
+    });
+    cx.simulate_event(gpui::MouseUpEvent {
+        position: edge,
+        modifiers: Modifiers::default(),
+        button: gpui::MouseButton::Left,
+        click_count: 2,
+    });
+    settle(cx);
+    assert_eq!(
+        cx.debug_bounds("binding-inspector").unwrap().size.width,
+        px(INSPECTOR_DEFAULT_W)
+    );
 
     drop(view);
     cx.update(|window, _| window.remove_window());

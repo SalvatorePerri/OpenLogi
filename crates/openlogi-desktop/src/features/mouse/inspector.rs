@@ -5,10 +5,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use gpui::{
-    Context, Entity, FocusHandle, InteractiveElement, IntoElement, ParentElement, Role,
-    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
+    AppContext as _, Axis, Context, Empty, Entity, FocusHandle, InteractiveElement, IntoElement,
+    ParentElement, Pixels, Render, Role, StatefulInteractiveElement as _, Styled, Window, div,
+    prelude::FluentBuilder as _, rgb, svg,
 };
-use gpui_kit::base::Button as BaseButton;
+use gpui_kit::base::{Button as BaseButton, HandleEdge, InteractiveElementExt as _, resize_handle};
 use gpui_kit::component::{
     Disableable as _, Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex,
     input::InputState, scroll::ScrollableElement as _, v_flex,
@@ -32,7 +33,24 @@ use crate::ui::theme::{
     self, ACCENT_BLUE, Palette, PressableStyle as _, SelectableStyle as _, Typography as _,
 };
 
-pub(super) const INSPECTOR_W: f32 = 328.;
+/// The inspector's width until the user drags its edge, and the narrowest it
+/// can get: the panel only grows from here.
+pub(super) const INSPECTOR_DEFAULT_W: f32 = 328.;
+/// The widest the user can drag the inspector, before the canvas floor
+/// ([`super::view`]) takes over on a narrow window.
+pub(super) const INSPECTOR_MAX_W: f32 = 560.;
+
+/// The payload of a drag on the inspector's edge: the workspace follows it
+/// with `on_drag_move` and keeps the width in the view. It renders nothing,
+/// since the pointer itself is the feedback.
+#[derive(Clone)]
+pub(super) struct ResizeInspector;
+
+impl Render for ResizeInspector {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(super) struct BindingInspectorData<'a> {
@@ -117,6 +135,7 @@ impl ShortcutMode {
 pub(super) fn binding_inspector(
     data: BindingInspectorData<'_>,
     picker: ActionPickerContext<'_>,
+    width: Pixels,
     cx: &Context<MouseModelView>,
 ) -> gpui::Div {
     let pal = theme::palette(cx);
@@ -141,7 +160,8 @@ pub(super) fn binding_inspector(
     };
 
     v_flex()
-        .w(px(INSPECTOR_W))
+        .relative()
+        .w(width)
         .h_full()
         .min_h_0()
         .flex_shrink_0()
@@ -157,6 +177,17 @@ pub(super) fn binding_inspector(
                 .overflow_y_scrollbar()
                 .p_4()
                 .child(body),
+        )
+        // Last, so it paints above the scrolling body that fills the panel.
+        .child(
+            resize_handle("inspector-edge", Axis::Horizontal)
+                .inside(HandleEdge::Leading)
+                .debug_selector(|| "inspector-edge".into())
+                .on_drag(ResizeInspector, |drag, _, _, cx| cx.new(|_| drag.clone()))
+                .on_double_click({
+                    let view = cx.entity();
+                    move |_, _, cx| view.update(cx, MouseModelView::reset_inspector_width)
+                }),
         )
 }
 
